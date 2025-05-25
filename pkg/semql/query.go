@@ -8,20 +8,18 @@ import (
 
 // QueryBuilder represents a SQL query builder for the semantic layer
 type QueryBuilder struct {
-	schema          *Schema
-	mainTable       string
-	selectedDims    []string
-	selectedMets    []string
-	filters         []Filter
-	sortFields      []SortField
-	timeFilter      *TimeFilter
-	timeGran        TimeGranularity
-	granularityDims []string       // Additional dimensions for time grouping
-	timezone        *time.Location // Timezone for time operations
-	limit           int
-	offset          int
-	args            []interface{}
-	fieldAliases    map[string]string // Stores mapping from selected field name to its SQL alias
+	schema       *Schema
+	mainTable    string
+	selectedDims []string
+	selectedMets []string
+	filters      []Filter
+	sortFields   []SortField
+	timeFilter   *TimeFilter
+	timezone     *time.Location // Timezone for time operations
+	limit        int
+	offset       int
+	args         []interface{}
+	fieldAliases map[string]string // Stores mapping from selected field name to its SQL alias
 }
 
 // Filter represents a filter condition
@@ -101,38 +99,10 @@ func (qb *QueryBuilder) Select(fields ...string) *QueryBuilder {
 			continue
 		}
 
-		// If not in main table, check external fields defined in joins of the main table
-		foundExternal := false
-		for _, join := range mainTableConfig.Joins {
-			for _, extDimName := range join.ExternalDimensions {
-				if extDimName == fieldName {
-					if !containsString(qb.selectedDims, fieldName) {
-						qb.selectedDims = append(qb.selectedDims, fieldName)
-					}
-					isDimension = true
-					foundExternal = true
-					break
-				}
-			}
-			if foundExternal {
-				break
-			}
-			for _, extMetName := range join.ExternalMetrics {
-				if extMetName == fieldName {
-					if !containsString(qb.selectedMets, fieldName) {
-						qb.selectedMets = append(qb.selectedMets, fieldName)
-					}
-					isMetric = true
-					foundExternal = true
-					break
-				}
-			}
-			if foundExternal {
-				break
-			}
-		}
-		// If not found anywhere, it's an unknown field.
-		// For robust error handling, one might add an error return or logging here.
+		// If not found in main table, it's an unknown field
+		// The new approach with join paths means all fields should be defined in the main table
+		// with their join paths specified if they come from other tables
+		return qb // Could also return an error here for unknown fields
 	}
 	return qb
 }
@@ -223,81 +193,105 @@ func (qb *QueryBuilder) WithTimezone(location *time.Location) *QueryBuilder {
 	return qb
 }
 
-// WithGranularity sets the time granularity for the query
-func (qb *QueryBuilder) WithGranularity(granularity TimeGranularity, additionalDimensions ...string) *QueryBuilder {
-	qb.timeGran = granularity
-	qb.granularityDims = additionalDimensions
-	return qb
-}
-
-// determineRequiredJoins determines which tables need to be joined.
-// Returns a map of target table names to their JoinConfig.
+// determineRequiredJoins determines which tables need to be joined based on field join paths.
+// Returns a map of target table names to their JoinConfig and a map of join paths to resolve multi-hop joins.
 func (qb *QueryBuilder) determineRequiredJoins() (map[string]*JoinConfig, error) {
 	requiredJoinConfigs := make(map[string]*JoinConfig)
 	mainTableConfig := qb.schema.Tables[qb.mainTable]
 
-	allSelectedFields := make(map[string]string) // fieldName -> type ("dim" or "met")
+	// Collect all unique join paths from selected fields
+	allJoinPaths := make(map[string][]string) // joinPathKey -> joinPath slice
+
+	// Add dimensions with their join paths
 	for _, dimName := range qb.selectedDims {
-		allSelectedFields[dimName] = "dim"
-	}
-	for _, metName := range qb.selectedMets {
-		allSelectedFields[metName] = "met"
-	}
-
-	for fieldName, fieldType := range allSelectedFields {
-		inMainTable := false
-		if fieldType == "dim" {
-			for _, dim := range mainTableConfig.Dimensions {
-				if dim.Name == fieldName {
-					inMainTable = true
-					break
+		found := false
+		for _, dim := range mainTableConfig.Dimensions {
+			if dim.Name == dimName {
+				found = true
+				if len(dim.JoinPath) > 0 {
+					joinPathKey := strings.Join(dim.JoinPath, ".")
+					allJoinPaths[joinPathKey] = dim.JoinPath
 				}
-			}
-		} else { // fieldType == "met"
-			for _, met := range mainTableConfig.Metrics {
-				if met.Name == fieldName {
-					inMainTable = true
-					break
-				}
-			}
-		}
-
-		if inMainTable {
-			continue
-		}
-
-		foundViaJoin := false
-		for _, joinConfig := range mainTableConfig.Joins {
-			targetTableName := joinConfig.Table
-			if fieldType == "dim" {
-				for _, extDimName := range joinConfig.ExternalDimensions {
-					if extDimName == fieldName {
-						requiredJoinConfigs[targetTableName] = joinConfig
-						foundViaJoin = true
-						break
-					}
-				}
-			} else { // fieldType == "met"
-				for _, extMetName := range joinConfig.ExternalMetrics {
-					if extMetName == fieldName {
-						requiredJoinConfigs[targetTableName] = joinConfig
-						foundViaJoin = true
-						break
-					}
-				}
-			}
-			if foundViaJoin {
 				break
 			}
 		}
-		if !foundViaJoin {
-			// Field selected but not in main table and not an external field in any join.
-			// This could be an error or an implicitly selected field from a joined table not marked as "external".
-			// For now, we proceed; buildSelectClause will ultimately fail if it can't resolve the field.
-			// Consider returning an error: fmt.Errorf("field '%s' is selected but cannot be resolved via main table or joins", fieldName)
+		if !found {
+			return nil, fmt.Errorf("dimension '%s' not found in table '%s'", dimName, qb.mainTable)
 		}
 	}
+
+	// Add metrics with their join paths
+	for _, metName := range qb.selectedMets {
+		found := false
+		for _, met := range mainTableConfig.Metrics {
+			if met.Name == metName {
+				found = true
+				if len(met.JoinPath) > 0 {
+					joinPathKey := strings.Join(met.JoinPath, ".")
+					allJoinPaths[joinPathKey] = met.JoinPath
+				}
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("metric '%s' not found in table '%s'", metName, qb.mainTable)
+		}
+	}
+
+	// Process each unique join path to determine required joins
+	for _, joinPath := range allJoinPaths {
+		err := qb.processJoinPath(joinPath, mainTableConfig, requiredJoinConfigs)
+		if err != nil {
+			return nil, fmt.Errorf("error processing join path %v: %w", joinPath, err)
+		}
+	}
+
 	return requiredJoinConfigs, nil
+}
+
+// processJoinPath processes a multi-hop join path and adds required join configurations
+func (qb *QueryBuilder) processJoinPath(joinPath []string, mainTableConfig *TableConfig, requiredJoinConfigs map[string]*JoinConfig) error {
+	currentTable := qb.mainTable
+	currentTableConfig := mainTableConfig
+
+	// Walk through each step in the join path
+	for _, targetTable := range joinPath {
+		// Skip if we already have this join configured
+		if _, exists := requiredJoinConfigs[targetTable]; exists {
+			// Move to the next table in the path
+			currentTable = targetTable
+			if tableConfig, ok := qb.schema.Tables[targetTable]; ok {
+				currentTableConfig = tableConfig
+			}
+			continue
+		}
+
+		// Find the join configuration from current table to target table
+		var joinConfig *JoinConfig
+		for _, join := range currentTableConfig.Joins {
+			if join.Table == targetTable {
+				joinConfig = join
+				break
+			}
+		}
+
+		if joinConfig == nil {
+			return fmt.Errorf("no join configuration found from table '%s' to table '%s' in join path %v", currentTable, targetTable, joinPath)
+		}
+
+		// Add this join to required joins
+		requiredJoinConfigs[targetTable] = joinConfig
+
+		// Move to the target table for the next iteration
+		currentTable = targetTable
+		if tableConfig, ok := qb.schema.Tables[targetTable]; ok {
+			currentTableConfig = tableConfig
+		} else {
+			return fmt.Errorf("target table '%s' not found in schema", targetTable)
+		}
+	}
+
+	return nil
 }
 
 // Helper function to check if a string is in a slice
@@ -310,41 +304,33 @@ func containsString(slice []string, item string) bool {
 	return false
 }
 
-// formatTimeGranularity formats a time field according to the specified granularity and timezone
-func (qb *QueryBuilder) formatTimeGranularity(tableAlias, timeFieldPhysical string) string {
-	tzName := "UTC" // Default timezone for ClickHouse functions if not specified
+// processExpressionTimezone replaces {{timezone}} placeholders in expressions with the actual timezone
+func (qb *QueryBuilder) processExpressionTimezone(expression string) string {
+	if !strings.Contains(expression, "{{timezone}}") {
+		return expression
+	}
+
+	// Determine the effective timezone for expression processing
+	effectiveTimezone := qb.getEffectiveTimezone()
+
+	// Replace the placeholder with the actual timezone string
+	return strings.ReplaceAll(expression, "{{timezone}}", effectiveTimezone)
+}
+
+// getEffectiveTimezone returns the timezone string to use in expressions
+func (qb *QueryBuilder) getEffectiveTimezone() string {
+	// Priority: query-level timezone > main table timezone > UTC default
 	if qb.timezone != nil {
-		tzName = qb.timezone.String()
+		return qb.timezone.String()
 	}
 
-	// Ensure timeFieldPhysical is qualified with tableAlias if not already
-	qualifiedTimeField := timeFieldPhysical
-	if tableAlias != "" && !strings.Contains(qualifiedTimeField, ".") {
-		qualifiedTimeField = fmt.Sprintf("%s.%s", tableAlias, timeFieldPhysical)
+	// Check main table's default timezone
+	if mainTableCfg, ok := qb.schema.Tables[qb.mainTable]; ok && mainTableCfg.TimeZone != nil {
+		return mainTableCfg.TimeZone.String()
 	}
 
-	// Apply toTimeZone function first
-	timeExprWithTz := fmt.Sprintf("toTimeZone(%s, '%s')", qualifiedTimeField, tzName)
-
-	switch qb.timeGran {
-	case GranularityHourly:
-		return fmt.Sprintf("toStartOfHour(%s)", timeExprWithTz)
-	case GranularityDaily:
-		return fmt.Sprintf("toStartOfDay(%s)", timeExprWithTz)
-	case GranularityWeekly:
-		// ClickHouse: toStartOfWeek(date, mode), mode 1 for Sunday, 2 for Monday
-		// Assuming Monday as start of week (mode 2 or 3 depending on ISO/US)
-		// Let's use toISOWeek and then toStartOfWeek with that week.
-		// Simpler: toMonday() gives start of ISO week.
-		return fmt.Sprintf("toMonday(%s)", timeExprWithTz)
-	case GranularityMonthly:
-		return fmt.Sprintf("toStartOfMonth(%s)", timeExprWithTz)
-	case GranularityYearly:
-		return fmt.Sprintf("toStartOfYear(%s)", timeExprWithTz)
-	default:
-		// Default to raw time field, but with timezone conversion
-		return timeExprWithTz
-	}
+	// Default to UTC if no timezone is specified
+	return "UTC"
 }
 
 // getTimeFieldAndTable finds the primary time field (logical and physical) and its table alias for the query.
@@ -412,7 +398,7 @@ func (qb *QueryBuilder) formatMetricWithAggregation(tableAlias, metricIdentifier
 	}
 
 	if needsAggregation {
-		// Default aggregation for simple column metrics when granularity is applied.
+		// Default aggregation for simple column metrics when aggregation is needed.
 		// TODO: Make aggregation type (SUM, AVG, etc.) configurable per metric.
 		return fmt.Sprintf("SUM(%s)", columnPart) // buildSelectClause will add "AS metricName"
 	}
@@ -483,20 +469,14 @@ func (qb *QueryBuilder) BuildSQL() (string, []interface{}, error) {
 
 	// Add regular filters
 	if len(qb.filters) > 0 {
-		filterArgs := qb.args[:0] // Temporary slice to hold only filter args for this section
 		for _, f := range qb.filters {
-			resolvedField, err := qb.resolveFieldExpressionForContext(f.Field, mainTableConfig, mainTableAlias, requiredJoinConfigs)
-			if err != nil {
-				return "", nil, fmt.Errorf("WHERE clause: failed to resolve field '%s': %w", f.Field, err)
-			}
-			whereClauses = append(whereClauses, fmt.Sprintf("%s %s ?", resolvedField, f.Operator))
-			// Value for this filter is at qb.args[currentArgsOffset]
-			filterArgs = append(filterArgs, qb.args[currentArgsOffset])
+			// resolvedField, err := qb.resolveFieldExpressionForContext(f.Field, mainTableConfig, mainTableAlias, requiredJoinConfigs)
+			// if err != nil {
+			// 	return "", nil, fmt.Errorf("WHERE clause: failed to resolve field '%s': %w", f.Field, err)
+			// }
+			whereClauses = append(whereClauses, fmt.Sprintf("%s %s ?", f.Field, f.Operator))
 			currentArgsOffset++
 		}
-		// qb.args for regular filters are handled; timeFilter args are separate.
-		// The qb.args needs careful management. Let's re-evaluate.
-		// Simpler: Where() adds value to qb.args. BuildSQL uses them in order.
 	}
 
 	// Add time filter if present
@@ -539,59 +519,33 @@ func (qb *QueryBuilder) BuildSQL() (string, []interface{}, error) {
 		query.WriteString(strings.Join(whereClauses, " AND "))
 	}
 
-	// GROUP BY clause
+	// GROUP BY clause - only add if we have dimensions that need grouping or aggregated metrics
 	var groupParts []string
 	needsGroupBy := false
-	if qb.timeGran != "" {
-		// Use the alias of the time_period column from SELECT clause for GROUP BY
-		// This is standard SQL behavior if the DB supports it.
-		// Or, repeat the expression. Repeating expression is safer.
-		timeTableAliasForGroupBy, _, timePhysicalFieldForGroupBy := qb.getTimeFieldAndTable()
-		if timePhysicalFieldForGroupBy != "" {
-			groupParts = append(groupParts, qb.formatTimeGranularity(timeTableAliasForGroupBy, timePhysicalFieldForGroupBy))
-			needsGroupBy = true
-		} else {
-			return "", nil, fmt.Errorf("time granularity specified but no time field found for GROUP BY")
+
+	// Check if we need aggregation (when we have metrics and dimensions together)
+	hasAggregatedMetrics := false
+	for _, metName := range qb.selectedMets {
+		_, _, isExpr, found := qb.findFieldDetails(metName, mainTableConfig, requiredJoinConfigs)
+		if found && !isExpr {
+			hasAggregatedMetrics = true
+			break
 		}
 	}
 
-	if len(qb.selectedDims) > 0 {
+	// Add selected dimensions to GROUP BY if we have aggregated metrics
+	if hasAggregatedMetrics && len(qb.selectedDims) > 0 {
 		for _, dimName := range qb.selectedDims {
-			resolvedDimExpr, err := qb.resolveFieldExpressionForContext(dimName, mainTableConfig, mainTableAlias, requiredJoinConfigs)
-			if err != nil {
-				return "", nil, fmt.Errorf("GROUP BY: failed to resolve dimension '%s': %w", dimName, err)
-			}
-			groupParts = append(groupParts, resolvedDimExpr)
-			needsGroupBy = true
-		}
-	}
-	if len(qb.granularityDims) > 0 {
-		for _, dimName := range qb.granularityDims {
-			resolvedDimExpr, err := qb.resolveFieldExpressionForContext(dimName, mainTableConfig, mainTableAlias, requiredJoinConfigs)
-			if err != nil {
-				return "", nil, fmt.Errorf("GROUP BY: failed to resolve granularity dimension '%s': %w", dimName, err)
-			}
-			if !containsString(groupParts, resolvedDimExpr) { // Avoid duplicates
-				groupParts = append(groupParts, resolvedDimExpr)
-			}
+			// resolvedDimExpr, err := qb.resolveFieldExpressionForContext(dimName, mainTableConfig, mainTableAlias, requiredJoinConfigs)
+			// if err != nil {
+			// 	return "", nil, fmt.Errorf("GROUP BY: failed to resolve dimension '%s': %w", dimName, err)
+			// }
+			groupParts = append(groupParts, dimName)
 			needsGroupBy = true
 		}
 	}
 
-	// Add GROUP BY clause only if there are grouping elements or if aggregation is implied by metrics/timegran
-	// If there are metrics selected and time granularity is applied, group by is necessary.
-	// If only dimensions are selected, but time granularity is applied, group by is necessary.
-	isAggregatedQuery := qb.timeGran != "" || (len(qb.selectedMets) > 0 && needsAggregation(qb, mainTableConfig, requiredJoinConfigs))
-
-	if needsGroupBy || (isAggregatedQuery && len(groupParts) == 0 && len(qb.selectedDims) == 0 && qb.timeGran == "") {
-		// If it's an aggregated query but no explicit group by fields yet (e.g. SELECT COUNT(*)),
-		// we might not need a GROUP BY. But if there are non-aggregated dims selected alongside aggregated metrics,
-		// those dims must be in GROUP BY. This is handled by adding selectedDims to groupParts.
-		// If groupParts is still empty but it's an aggregate query (e.g. SELECT SUM(X) FROM T), no GROUP BY needed.
-		// This condition is complex. Simplification: if groupParts is populated, add GROUP BY.
-	}
-
-	if len(groupParts) > 0 {
+	if needsGroupBy && len(groupParts) > 0 {
 		query.WriteString(" GROUP BY ")
 		query.WriteString(strings.Join(groupParts, ", "))
 	}
@@ -614,11 +568,6 @@ func (qb *QueryBuilder) BuildSQL() (string, []interface{}, error) {
 			}
 		}
 		query.WriteString(strings.Join(orderParts, ", "))
-	} else if qb.timeGran != "" {
-		// Default sort by time_period when using time granularity, if time_period is selected
-		if _, ok := qb.fieldAliases["time_period"]; ok {
-			query.WriteString(" ORDER BY time_period ASC")
-		}
 	}
 
 	// LIMIT and OFFSET
@@ -634,13 +583,10 @@ func (qb *QueryBuilder) BuildSQL() (string, []interface{}, error) {
 
 // Helper to check if query implies aggregation
 func needsAggregation(qb *QueryBuilder, mainTableConfig *TableConfig, requiredJoinConfigs map[string]*JoinConfig) bool {
-	if qb.timeGran != "" {
-		return true
-	}
 	for _, metName := range qb.selectedMets {
 		// Find metric definition
 		_, _, isExpr, _ := qb.findFieldDetails(metName, mainTableConfig, requiredJoinConfigs)
-		if !isExpr { // Simple column metric, implies aggregation if other non-aggregated fields or timegran exists
+		if !isExpr { // Simple column metric, implies aggregation if other non-aggregated fields exist
 			return true
 		}
 		// If it's an expression, it's responsible for its own aggregation.
@@ -666,58 +612,82 @@ func (qb *QueryBuilder) findFieldDetails(
 	// Check main table dimensions
 	for _, dim := range mainTableConfig.Dimensions {
 		if dim.Name == fieldName {
-			return dim.Column, mainTableAlias, false, true
+			if len(dim.JoinPath) == 0 {
+				// Field is in main table
+				// Process timezone placeholders and check if it's an expression
+				processedColumn := qb.processExpressionTimezone(dim.Column)
+				isExpr := qb.isExpression(processedColumn)
+				return processedColumn, mainTableAlias, isExpr, true
+			} else {
+				// Field requires join - find the final target table in the join path
+				finalTableName := dim.JoinPath[len(dim.JoinPath)-1]
+				if joinedTableSchema, ok := qb.schema.Tables[finalTableName]; ok {
+					joinedTableAlias := joinedTableSchema.Alias
+					if joinedTableAlias == "" {
+						joinedTableAlias = finalTableName
+					}
+					// Find the actual field in the final target table
+					for _, targetDim := range joinedTableSchema.Dimensions {
+						if targetDim.Name == fieldName {
+							// Process timezone placeholders and check if it's an expression
+							processedColumn := qb.processExpressionTimezone(targetDim.Column)
+							isExpr := qb.isExpression(processedColumn)
+							return processedColumn, joinedTableAlias, isExpr, true
+						}
+					}
+				}
+			}
 		}
 	}
+
 	// Check main table metrics
 	for _, met := range mainTableConfig.Metrics {
 		if met.Name == fieldName {
-			id := met.Column
-			isExpr := false
-			if met.Expression != "" {
-				id = met.Expression
-				isExpr = true
-			}
-			return id, mainTableAlias, isExpr, true
-		}
-	}
-
-	// Check joined tables
-	for joinedTableName, joinConfig := range requiredJoinConfigs {
-		joinedTableSchema := qb.schema.Tables[joinedTableName]
-		joinedTableAlias := joinedTableSchema.Alias
-		if joinedTableAlias == "" {
-			joinedTableAlias = joinedTableName
-		}
-
-		// Check dimensions in joined table if fieldName is an external dim for this join
-		for _, extDimName := range joinConfig.ExternalDimensions {
-			if extDimName == fieldName {
-				for _, dim := range joinedTableSchema.Dimensions {
-					if dim.Name == fieldName {
-						return dim.Column, joinedTableAlias, false, true
+			if len(met.JoinPath) == 0 {
+				// Field is in main table
+				processedColumn := qb.processExpressionTimezone(met.Column)
+				isExpr := qb.isExpression(processedColumn)
+				return processedColumn, mainTableAlias, isExpr, true
+			} else {
+				// Field requires join - find the final target table in the join path
+				finalTableName := met.JoinPath[len(met.JoinPath)-1]
+				if joinedTableSchema, ok := qb.schema.Tables[finalTableName]; ok {
+					joinedTableAlias := joinedTableSchema.Alias
+					if joinedTableAlias == "" {
+						joinedTableAlias = finalTableName
 					}
-				}
-			}
-		}
-		// Check metrics in joined table if fieldName is an external met for this join
-		for _, extMetName := range joinConfig.ExternalMetrics {
-			if extMetName == fieldName {
-				for _, met := range joinedTableSchema.Metrics {
-					if met.Name == fieldName {
-						id := met.Column
-						isExpr := false
-						if met.Expression != "" {
-							id = met.Expression
-							isExpr = true
+					// Find the actual field in the final target table
+					for _, targetMet := range joinedTableSchema.Metrics {
+						if targetMet.Name == fieldName {
+							processedColumn := qb.processExpressionTimezone(targetMet.Column)
+							isExpr := qb.isExpression(processedColumn)
+							return processedColumn, joinedTableAlias, isExpr, true
 						}
-						return id, joinedTableAlias, isExpr, true
 					}
 				}
 			}
 		}
 	}
+
 	return "", "", false, false
+}
+
+// isExpression determines if a column string is a simple column name or a complex SQL expression
+func (qb *QueryBuilder) isExpression(column string) bool {
+	// Simple heuristic: if it contains function calls, operators, or spaces, it's likely an expression
+	// This could be made more sophisticated if needed
+	return strings.Contains(column, "(") ||
+		strings.Contains(column, "+") ||
+		strings.Contains(column, "-") ||
+		strings.Contains(column, "*") ||
+		strings.Contains(column, "/") ||
+		strings.Contains(column, " ") ||
+		strings.Contains(column, "CASE") ||
+		strings.Contains(column, "SUM") ||
+		strings.Contains(column, "AVG") ||
+		strings.Contains(column, "COUNT") ||
+		strings.Contains(column, "MAX") ||
+		strings.Contains(column, "MIN")
 }
 
 // buildSelectClause builds the SELECT part of the query.
@@ -729,28 +699,30 @@ func (qb *QueryBuilder) buildSelectClause(
 	selectParts := []string{}
 	qb.fieldAliases = make(map[string]string) // Reset for current build
 
-	needsAgg := qb.timeGran != "" // Simplified: aggregation needed if time granularity is set.
-	// More complex: if any metric needs aggregation.
-
-	// Add time granularity field if specified
-	if qb.timeGran != "" {
-		timeTableAlias, _, timePhysicalField := qb.getTimeFieldAndTable()
-		if timePhysicalField != "" {
-			formattedTimeField := qb.formatTimeGranularity(timeTableAlias, timePhysicalField)
-			selectParts = append(selectParts, fmt.Sprintf("%s AS time_period", formattedTimeField))
-			qb.fieldAliases["time_period"] = "time_period"
-		} else {
-			return "", fmt.Errorf("time granularity specified but no time field found")
+	// Check if we need aggregation (when we have non-expression metrics and dimensions together)
+	needsAgg := false
+	for _, metName := range qb.selectedMets {
+		_, _, isExpr, found := qb.findFieldDetails(metName, mainTableConfig, requiredJoinConfigs)
+		if found && !isExpr && len(qb.selectedDims) > 0 {
+			needsAgg = true
+			break
 		}
 	}
 
 	// Add dimensions
 	for _, dimName := range qb.selectedDims {
-		identifier, tableAlias, _, found := qb.findFieldDetails(dimName, mainTableConfig, requiredJoinConfigs)
+		identifier, tableAlias, isExpr, found := qb.findFieldDetails(dimName, mainTableConfig, requiredJoinConfigs)
 		if !found {
 			return "", fmt.Errorf("dimension '%s' not found in schema or joins", dimName)
 		}
-		selectParts = append(selectParts, fmt.Sprintf("%s.%s AS %s", tableAlias, identifier, dimName))
+
+		if isExpr {
+			// Use expression directly (e.g., time granularity functions)
+			selectParts = append(selectParts, fmt.Sprintf("%s AS %s", identifier, dimName))
+		} else {
+			// Use qualified column name
+			selectParts = append(selectParts, fmt.Sprintf("%s.%s AS %s", tableAlias, identifier, dimName))
+		}
 		qb.fieldAliases[dimName] = dimName
 	}
 
@@ -761,23 +733,7 @@ func (qb *QueryBuilder) buildSelectClause(
 			return "", fmt.Errorf("metric '%s' not found in schema or joins", metName)
 		}
 
-		// Determine if this specific metric implies overall query aggregation
-		// This is a simplification; a metric might be pre-aggregated in its expression.
-		metricNeedsAgg := needsAgg      // 'needsAgg' here is from qb.timeGran != ""
-		if !isExpr && !metricNeedsAgg { // If it's a simple column and no global agg, check if other metrics force agg
-			if len(qb.selectedMets) > 1 || qb.timeGran != "" { // If multiple mets or time gran, simple cols likely need agg
-				// This heuristic might need refinement.
-				// If a query is SELECT dim, sum(met1), met2. met2 needs agg.
-				// For now, rely on global `needsAgg` from timeGran.
-				// And formatMetricWithAggregation's `needsAggregation` param.
-			}
-		}
-
-		// If isExpr is false (metric is a simple column), then (needsAgg || !isExpr) becomes (needsAgg || true), which is true.
-		// This ensures formatMetricWithAggregation receives true for needsAggregation, and applies SUM().
-		// If isExpr is true (metric is an expression), then (needsAgg || !isExpr) becomes (needsAgg || false), which is needsAgg.
-		// formatMetricWithAggregation receives isExpr=true, so it uses the expression directly, and the needsAgg param doesn't add SUM().
-		formattedMetricBase := qb.formatMetricWithAggregation(tableAlias, identifier, metName, isExpr, needsAgg || !isExpr)
+		formattedMetricBase := qb.formatMetricWithAggregation(tableAlias, identifier, metName, isExpr, needsAgg && !isExpr)
 		selectParts = append(selectParts, fmt.Sprintf("%s AS %s", formattedMetricBase, metName))
 		qb.fieldAliases[metName] = metName
 	}
@@ -831,7 +787,7 @@ func (qb *QueryBuilder) getTableAliasForPhysicalField(
 	}
 	// Check all metrics (physical column) in main table
 	for _, met := range mainTableConfig.Metrics {
-		if met.Column == physicalField && met.Expression == "" { // Ensure it's a direct column
+		if met.Column == physicalField { // Ensure it's a direct column
 			return mainTableAlias
 		}
 	}
@@ -852,7 +808,7 @@ func (qb *QueryBuilder) getTableAliasForPhysicalField(
 			}
 		}
 		for _, met := range tableCfg.Metrics {
-			if met.Column == physicalField && met.Expression == "" {
+			if met.Column == physicalField {
 				return tableAlias
 			}
 		}

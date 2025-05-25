@@ -41,9 +41,9 @@ type TimeSeriesStats struct {
 	TimePeriod     time.Time `db:"time_period"`
 	CampaignName   string    `db:"campaignName"`
 	AdvertiserName string    `db:"advertiserName"`
-	Impressions    int64     `db:"sumImpressions"`
-	Clicks         int64     `db:"sumClicks"`
-	Spend          float64   `db:"sumSpend"`
+	Impressions    int64     `db:"sumImpression"`
+	Clicks         int64     `db:"sumClick"`
+	Spend          float64   `db:"spend"`
 	CTR            float64   `db:"ctr"`
 }
 
@@ -53,7 +53,7 @@ func ExampleSetup() *semql.Schema {
 	schema := semql.NewSchema()
 
 	// Get some time zones for examples
-	nyTz, _ := time.LoadLocation("America/New_York")
+	tz, _ := time.LoadLocation("Europe/Istanbul")
 	// tokyoTz, _ := time.LoadLocation("Asia/Tokyo")
 
 	// Define the campaigns table (in PostgreSQL)
@@ -80,7 +80,13 @@ func ExampleSetup() *semql.Schema {
 				Type:        "Int32",
 				Description: "ID of the advertiser who owns the campaign",
 			},
-			// advertiserName is now external, removed from here
+			{
+				Name:        "advertiserName",
+				Column:      "name",
+				Type:        "String",
+				Description: "Name of the advertiser",
+				JoinPath:    []string{"facts.advertisers"}, // This field comes from advertisers table
+			},
 			{
 				Name:        "startDate",
 				Column:      "start_date",
@@ -93,6 +99,42 @@ func ExampleSetup() *semql.Schema {
 				Type:        "Date",
 				Description: "End date of the campaign",
 			},
+			// Time granularity dimensions that reference the time field from stats_hourly
+			{
+				Name:        "timeHour",
+				Column:      "toStartOfHour(toTimeZone(sh.time, '{{timezone}}'))",
+				Type:        "DateTime",
+				Description: "Time aggregated to start of hour",
+				JoinPath:    []string{"stats.stats_hourly"},
+			},
+			{
+				Name:        "timeDay",
+				Column:      "toStartOfDay(toTimeZone(sh.time, '{{timezone}}'))",
+				Type:        "Date",
+				Description: "Time aggregated to start of day",
+				JoinPath:    []string{"stats.stats_hourly"},
+			},
+			{
+				Name:        "timeWeek",
+				Column:      "toMonday(toTimeZone(sh.time, '{{timezone}}'))",
+				Type:        "Date",
+				Description: "Time aggregated to start of week (Monday)",
+				JoinPath:    []string{"stats.stats_hourly"},
+			},
+			{
+				Name:        "timeMonth",
+				Column:      "toStartOfMonth(toTimeZone(sh.time, '{{timezone}}'))",
+				Type:        "Date",
+				Description: "Time aggregated to start of month",
+				JoinPath:    []string{"stats.stats_hourly"},
+			},
+			{
+				Name:        "timeYear",
+				Column:      "toYear(toTimeZone(sh.time, '{{timezone}}'))",
+				Type:        "UInt16",
+				Description: "Time aggregated to year",
+				JoinPath:    []string{"stats.stats_hourly"},
+			},
 		},
 		Metrics: []*semql.MetricField{
 			{
@@ -102,9 +144,69 @@ func ExampleSetup() *semql.Schema {
 				Description: "Campaign budget",
 				Format:      "currency",
 			},
-			// sumImpressions is now external, removed from here
+			{
+				Name:        "balance",
+				Column:      "balance",
+				Type:        "Float64",
+				Description: "Advertiser balance",
+				Format:      "currency",
+				JoinPath:    []string{"facts.advertisers"}, // This field comes from advertisers table
+			},
+			{
+				Name:        "sumImpression",
+				Column:      "sum_impression",
+				Type:        "Int64",
+				Description: "Sum of impressions",
+				JoinPath:    []string{"stats.stats_hourly"}, // This field comes from stats_hourly table
+			},
+			{
+				Name:        "sumClick",
+				Column:      "sum_click",
+				Type:        "Int64",
+				Description: "Sum of clicks",
+				JoinPath:    []string{"stats.stats_hourly"}, // This field comes from stats_hourly table
+			},
+			{
+				Name:        "spend",
+				Column:      "sum_spend",
+				Type:        "Float64",
+				Description: "Sum of spend",
+				Format:      "currency",
+				JoinPath:    []string{"stats.stats_hourly"}, // This field comes from stats_hourly table
+			},
+			{
+				Name:        "ctr",
+				Column:      "(SUM(sh.sum_click) / SUM(sh.sum_impression)) * 100",
+				Type:        "Float64",
+				Description: "Click-through rate (percentage)",
+				Format:      "percentage",
+				JoinPath:    []string{"stats.stats_hourly"}, // This expression uses stats_hourly table
+			},
+			{
+				Name:        "cpc",
+				Column:      "SUM(sh.sum_spend) / NULLIF(SUM(sh.sum_click), 0)",
+				Type:        "Float64",
+				Description: "Cost per click",
+				Format:      "currency",
+				JoinPath:    []string{"stats.stats_hourly"}, // This expression uses stats_hourly table
+			},
 		},
-		Joins: []*semql.JoinConfig{},
+		Joins: []*semql.JoinConfig{
+			{
+				Table: "facts.advertisers",
+				Type:  semql.LeftJoin,
+				Conditions: []semql.JoinCondition{
+					{LeftField: "advertiser_id", Operator: "=", RightField: "id"},
+				},
+			},
+			{
+				Table: "stats.stats_hourly",
+				Type:  semql.LeftJoin,
+				Conditions: []semql.JoinCondition{
+					{LeftField: "id", Operator: "=", RightField: "campaign_id"},
+				},
+			},
+		},
 	}
 
 	// Define the advertisers table (in PostgreSQL)
@@ -143,7 +245,7 @@ func ExampleSetup() *semql.Schema {
 		Name:      "stats.stats_hourly",
 		Alias:     "sh",
 		TimeField: "time",
-		TimeZone:  nyTz, // Set default timezone for this table to New York
+		TimeZone:  tz, // Set default timezone for this table to Istanbul
 		Dimensions: []*semql.DimensionField{
 			{
 				Name:        "advertiserId",
@@ -157,22 +259,67 @@ func ExampleSetup() *semql.Schema {
 				Type:        "Int32",
 				Description: "ID of the campaign",
 			},
+			{
+				Name:        "campaignName",
+				Column:      "name",
+				Type:        "String",
+				Description: "Name of the campaign",
+				JoinPath:    []string{"facts.campaigns"}, // This field comes from campaigns table
+			},
+			{
+				Name:        "advertiserName",
+				Column:      "name",
+				Type:        "String",
+				Description: "Name of the advertiser",
+				JoinPath:    []string{"facts.advertisers"}, // This field comes from advertisers table
+			},
+			// Time granularity dimensions using this table's time field directly
+			{
+				Name:        "timeHour",
+				Column:      "toStartOfHour(toTimeZone(sh.time, '{{timezone}}'))",
+				Type:        "DateTime",
+				Description: "Time aggregated to start of hour",
+			},
+			{
+				Name:        "timeDay",
+				Column:      "toStartOfDay(toTimeZone(sh.time, '{{timezone}}'))",
+				Type:        "Date",
+				Description: "Time aggregated to start of day",
+			},
+			{
+				Name:        "timeWeek",
+				Column:      "toMonday(toTimeZone(sh.time, '{{timezone}}'))",
+				Type:        "Date",
+				Description: "Time aggregated to start of week (Monday)",
+			},
+			{
+				Name:        "timeMonth",
+				Column:      "toStartOfMonth(toTimeZone(sh.time, '{{timezone}}'))",
+				Type:        "Date",
+				Description: "Time aggregated to start of month",
+			},
+			{
+				Name:        "timeYear",
+				Column:      "toYear(toTimeZone(sh.time, '{{timezone}}'))",
+				Type:        "UInt16",
+				Description: "Time aggregated to year",
+			},
 		},
 		Metrics: []*semql.MetricField{
 			{
-				Name:        "sumImpressions",
+				Name:        "sumImpression",
 				Column:      "sum_impression",
 				Type:        "Int64",
 				Description: "Sum of impressions",
 			},
 			{
-				Name:        "sumClicks",
+				Name:        "sumClick",
 				Column:      "sum_click",
 				Type:        "Int64",
 				Description: "Sum of clicks",
 			},
 			{
-				Name:        "sumSpend",
+				Name:        "spend",
 				Column:      "sum_spend",
 				Type:        "Float64",
 				Description: "Sum of spend",
@@ -180,27 +327,26 @@ func ExampleSetup() *semql.Schema {
 			},
 			{
 				Name:        "ctr",
+				Column:      "(SUM(sh.sum_click) / SUM(sh.sum_impression)) * 100",
 				Type:        "Float64",
-				Expression:  "(SUM(sh.sum_click) / SUM(sh.sum_impression)) * 100",
 				Description: "Click-through rate (percentage)",
 				Format:      "percentage",
 			},
 			{
 				Name:        "cpc",
+				Column:      "SUM(sh.sum_spend) / NULLIF(SUM(sh.sum_click), 0)",
 				Type:        "Float64",
-				Expression:  "SUM(sh.sum_spend) / NULLIF(SUM(sh.sum_click), 0)",
 				Description: "Cost per click",
 				Format:      "currency",
 			},
 		},
-		Joins: []*semql.JoinConfig{ // Added Joins for statsHourlyTable
+		Joins: []*semql.JoinConfig{
 			{
 				Table: "facts.campaigns",
 				Type:  semql.LeftJoin,
 				Conditions: []semql.JoinCondition{
 					{LeftField: "campaign_id", Operator: "=", RightField: "id"},
 				},
-				ExternalDimensions: []string{"campaignName"},
 			},
 			{
 				Table: "facts.advertisers",
@@ -208,39 +354,7 @@ func ExampleSetup() *semql.Schema {
 				Conditions: []semql.JoinCondition{
 					{LeftField: "advertiser_id", Operator: "=", RightField: "id"},
 				},
-				ExternalDimensions: []string{"advertiserName"},
 			},
-		},
-	}
-
-	// Define relationships between tables
-	campaignsTable.Joins = []*semql.JoinConfig{
-		{
-			Table: "facts.advertisers",
-			Type:  semql.LeftJoin,
-			Conditions: []semql.JoinCondition{
-				{
-					LeftField:  "advertiser_id",
-					Operator:   "=",
-					RightField: "id",
-				},
-			},
-			// When these external dimensions are requested, join advertisers table automatically
-			ExternalDimensions: []string{"advertiserName"},
-			ExternalMetrics:    []string{"balance"},
-		},
-		{
-			Table: "stats.stats_hourly",
-			Type:  semql.LeftJoin,
-			Conditions: []semql.JoinCondition{
-				{
-					LeftField:  "id",
-					Operator:   "=",
-					RightField: "campaign_id",
-				},
-			},
-			// When these external metrics are requested, join stats_hourly table automatically
-			ExternalMetrics: []string{"sumImpressions", "sumClicks", "sumSpend", "ctr", "cpc"},
 		},
 	}
 
@@ -282,8 +396,8 @@ func ExampleQueries(schema *semql.Schema) {
 
 	// Example 3: Query with automatic join to stats_hourly
 	query3 := semql.NewQueryBuilder(schema, "facts.campaigns")
-	query3.Select("campaignName", "advertiserName", "sumImpressions", "sumClicks", "sumSpend", "ctr")
-	query3.Where("sumImpressions", ">", 1000)
+	query3.Select("campaignName", "advertiserName", "sumImpression", "sumClick", "spend", "ctr")
+	query3.Where("sumImpression", ">", 1000)
 	query3.OrderBy("ctr", "DESC")
 	query3.Limit(10)
 	sql3, args3, err3 := query3.BuildSQL()
@@ -304,9 +418,8 @@ func ExampleTimeBasedQueries(schema *semql.Schema) {
 	endDate := time.Now()
 
 	query1 := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query1.Select("campaignId", "sumImpressions", "sumClicks", "sumSpend", "ctr")
+	query1.Select("campaignId", "timeDay", "sumImpression", "sumClick", "spend", "ctr")
 	query1.Between(startDate, endDate)
-	query1.WithGranularity(semql.GranularityDaily, "campaignId")
 	query1.Where("campaignId", "=", 123)
 	sql1, args1, err1 := query1.BuildSQL()
 	if err1 != nil {
@@ -323,9 +436,8 @@ func ExampleTimeBasedQueries(schema *semql.Schema) {
 	endDate = time.Now()
 
 	query2 := semql.NewQueryBuilder(schema, "facts.campaigns")
-	query2.Select("campaignName", "advertiserName", "sumImpressions", "sumClicks", "sumSpend", "ctr")
+	query2.Select("timeMonth", "advertiserName", "sumImpression", "sumClick", "spend", "ctr")
 	query2.Between(startDate, endDate)
-	query2.WithGranularity(semql.GranularityMonthly, "advertiserName")
 	sql2, args2, err2 := query2.BuildSQL()
 	if err2 != nil {
 		log.Fatalf("Time Query 2 failed: %v", err2)
@@ -341,10 +453,9 @@ func ExampleTimeBasedQueries(schema *semql.Schema) {
 	endDate = time.Now()
 
 	query3 := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query3.Select("sumImpressions", "sumClicks", "ctr")
+	query3.Select("timeHour", "sumImpression", "sumClick", "ctr")
 	query3.Between(startDate, endDate)
-	query3.WithGranularity(semql.GranularityHourly)
-	query3.OrderBy("time_period", "ASC")
+	query3.OrderBy("timeHour", "ASC")
 	sql3, args3, err3 := query3.BuildSQL()
 	if err3 != nil {
 		log.Fatalf("Time Query 3 failed: %v", err3)
@@ -360,11 +471,10 @@ func ExampleTimeBasedQueries(schema *semql.Schema) {
 	endDate = time.Now()
 
 	query4 := semql.NewQueryBuilder(schema, "facts.campaigns")
-	query4.Select("campaignName", "sumImpressions", "sumClicks", "sumSpend", "ctr")
+	query4.Select("timeWeek", "campaignName", "sumImpression", "sumClick", "spend", "ctr")
 	query4.Between(startDate, endDate)
-	query4.WithGranularity(semql.GranularityWeekly, "campaignName")
 	query4.OrderBy("campaignName", "ASC")
-	query4.OrderBy("time_period", "ASC")
+	query4.OrderBy("timeWeek", "ASC")
 	sql4, args4, err4 := query4.BuildSQL()
 	if err4 != nil {
 		log.Fatalf("Time Query 4 failed: %v", err4)
@@ -389,17 +499,16 @@ func ExampleExecuteTimeQuery(schema *semql.Schema) {
 	startDate := time.Now().AddDate(0, 0, -30)
 	endDate := time.Now()
 
-	// Load New York timezone as stats_hourly data is associated with it
-	nyTz, err := time.LoadLocation("America/New_York")
+	// Load Istanbul timezone as stats_hourly data is associated with it
+	tz, err := time.LoadLocation("Europe/Istanbul")
 	if err != nil {
 		log.Fatalf("Failed to load timezone: %v", err)
 	}
 
 	query := semql.NewQueryBuilder(schema, "facts.campaigns")
-	query.Select("campaignName", "advertiserName", "sumImpressions", "sumClicks", "sumSpend", "ctr")
+	query.Select("campaignName", "advertiserName", "timeDay", "sumImpression", "sumClick", "spend", "ctr")
 	query.Between(startDate, endDate)
-	query.WithGranularity(semql.GranularityDaily, "campaignName")
-	query.WithTimezone(nyTz) // Operate in New York timezone context
+	query.WithTimezone(tz) // Operate in Istanbul timezone context
 
 	// Execute the query
 	var results []TimeSeriesStats
@@ -427,35 +536,33 @@ func ExampleExecuteTimeQuery(schema *semql.Schema) {
 // ExampleTimezoneQueries demonstrates timezone support in queries
 func ExampleTimezoneQueries(schema *semql.Schema) {
 	// Load some example time zones
-	nyTz, _ := time.LoadLocation("America/New_York")
+	tz, _ := time.LoadLocation("Europe/Istanbul")
 	londonTz, _ := time.LoadLocation("Europe/London")
 	tokyoTz, _ := time.LoadLocation("Asia/Tokyo")
 
-	// Example 1: Query with New York timezone
-	startDate := time.Date(2025, 5, 1, 0, 0, 0, 0, nyTz)
-	endDate := time.Date(2025, 5, 24, 23, 59, 59, 0, nyTz)
+	// Example 1: Query with Istanbul timezone
+	startDate := time.Date(2025, 5, 1, 0, 0, 0, 0, tz)
+	endDate := time.Date(2025, 5, 24, 23, 59, 59, 0, tz)
 
 	query1 := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query1.Select("sumImpressions", "sumClicks", "ctr")
+	query1.Select("timeDay", "sumImpression", "sumClick", "ctr")
 	query1.Between(startDate, endDate)
-	query1.WithTimezone(nyTz) // Explicitly set timezone to New York
-	query1.WithGranularity(semql.GranularityDaily)
+	query1.WithTimezone(tz) // Explicitly set timezone to Istanbul
 	sql1, args1, err1 := query1.BuildSQL()
 	if err1 != nil {
 		log.Fatalf("Timezone Query 1 failed: %v", err1)
 	}
 
-	fmt.Println("Example 1 - New York timezone daily stats:")
+	fmt.Println("Example 1 - Istanbul timezone daily stats:")
 	fmt.Println(sql1)
 	fmt.Println("Args:", args1)
 	fmt.Println()
 
 	// Example 2: Same date range but with London timezone
 	query2 := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query2.Select("sumImpressions", "sumClicks", "ctr")
+	query2.Select("timeDay", "sumImpression", "sumClick", "ctr")
 	query2.Between(startDate, endDate) // Same time range but will be interpreted in London time
 	query2.WithTimezone(londonTz)      // Explicitly set timezone to London
-	query2.WithGranularity(semql.GranularityDaily)
 	sql2, args2, err2 := query2.BuildSQL()
 	if err2 != nil {
 		log.Fatalf("Timezone Query 2 failed: %v", err2)
@@ -471,11 +578,10 @@ func ExampleTimezoneQueries(schema *semql.Schema) {
 	endOfDay := time.Date(2025, 5, 24, 23, 59, 59, 0, tokyoTz)
 
 	query3 := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query3.Select("sumImpressions", "sumClicks", "sumSpend", "ctr")
+	query3.Select("timeHour", "sumImpression", "sumClick", "spend", "ctr")
 	query3.Between(startOfDay, endOfDay)
 	query3.WithTimezone(tokyoTz)
-	query3.WithGranularity(semql.GranularityHourly)
-	query3.OrderBy("time_period", "ASC")
+	query3.OrderBy("timeHour", "ASC")
 	sql3, args3, err3 := query3.BuildSQL()
 	if err3 != nil {
 		log.Fatalf("Timezone Query 3 failed: %v", err3)
@@ -490,30 +596,29 @@ func ExampleTimezoneQueries(schema *semql.Schema) {
 	// This example shows how to run the same query with different timezones
 	// for comparison purposes
 
-	fmt.Println("Example 4 - Comparing the same hourly data across different timezones:")
+	fmt.Println("Example 4 - Comparing the same daily data across different timezones:")
 
 	// Reference time: May 24, 2025 at 12:00 UTC
 	refTime := time.Date(2025, 5, 24, 12, 0, 0, 0, time.UTC)
 
 	// Calculate local times in different timezones
 	fmt.Printf("Reference time (UTC): %s\n", refTime.Format("2006-01-02 15:04:05 MST"))
-	fmt.Printf("New York time:        %s\n", refTime.In(nyTz).Format("2006-01-02 15:04:05 MST"))
+	fmt.Printf("Istanbul time:        %s\n", refTime.In(tz).Format("2006-01-02 15:04:05 MST"))
 	fmt.Printf("London time:          %s\n", refTime.In(londonTz).Format("2006-01-02 15:04:05 MST"))
 	fmt.Printf("Tokyo time:           %s\n", refTime.In(tokyoTz).Format("2006-01-02 15:04:05 MST"))
 	fmt.Println()
 
 	// Generate queries for the full day in each timezone
-	timezones := []*time.Location{time.UTC, nyTz, londonTz, tokyoTz}
+	timezones := []*time.Location{time.UTC, tz, londonTz, tokyoTz}
 	for _, tz := range timezones {
 		// Create a query for full day in the current timezone
 		dayStart := time.Date(2025, 5, 24, 0, 0, 0, 0, tz)
 		dayEnd := time.Date(2025, 5, 24, 23, 59, 59, 0, tz)
 
 		query := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-		query.Select("sumImpressions", "sumClicks")
+		query.Select("timeDay", "sumImpression", "sumClick")
 		query.Between(dayStart, dayEnd)
 		query.WithTimezone(tz)
-		query.WithGranularity(semql.GranularityDaily)
 		sql, args, err := query.BuildSQL()
 		if err != nil {
 			log.Fatalf("Timezone Query (loop) failed for %s: %v", tz.String(), err)
@@ -575,9 +680,8 @@ func ExampleCustomClickHouseConnection(schema *semql.Schema) {
 	endDate := time.Now()
 
 	query := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query.Select("campaignId", "sumImpressions", "sumClicks", "ctr")
+	query.Select("campaignId", "sumImpression", "sumClick", "ctr")
 	query.Between(startDate, endDate)
-	query.WithGranularity(semql.GranularityDaily)
 	query.Limit(10)
 
 	// Execute the query
@@ -606,39 +710,33 @@ func ExampleCustomClickHouseConnection(schema *semql.Schema) {
 
 // ExampleLastTwoDaysData demonstrates how to query data for the last 2 days with advertiser name, campaign name, and impressions
 func ExampleLastTwoDaysData(schema *semql.Schema) {
-	// Load New York timezone
-	nyTz, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		log.Fatalf("Failed to load timezone: %v", err)
-	}
-
-	// Calculate time range for the last 2 days in New York timezone
+	// Calculate time range for the last 2 days in Istanbul timezone
 	// Using the current date from context for consistency with example SQL
-	baseDate := time.Date(2025, 5, 24, 0, 0, 0, 0, nyTz)
+	baseDate := time.Date(2025, 5, 24, 0, 0, 0, 0, time.UTC)
 	startDate := baseDate.AddDate(0, 0, -2) // 2 days ago in NY
 	endDate := baseDate                     // Today in NY (exclusive end for < operator)
 
-	fmt.Printf("\\n--- Example: Last 2 Days Data (From %s to %s, Timezone: %s) ---\\n",
+	fmt.Printf("\\n--- Example: Last 2 Days Data (From %s to %s) ---\\n",
 		startDate.Format("2006-01-02"),
-		endDate.Format("2006-01-02"),
-		nyTz.String())
+		endDate.Format("2006-01-02"))
 
 	// Create a new query starting from stats_hourly table
 	query := semql.NewQueryBuilder(schema, "stats.stats_hourly")
 
 	// Select advertiser name, campaign name, and sum of impressions
-	query.Select("advertiserName", "campaignName", "sumImpressions")
+	query.Select("timeDay", "advertiserId", "campaignId", "sumImpression")
 
 	// Filter for the last 2 days
-	query.Between(startDate, endDate) // These are already in nyTz
+	query.Between(startDate, endDate)
+
+	query.Where("campaignId", "=", 5938) // Example campaign ID
 
 	// Group by day, advertiser, and campaign
-	// Query timezone will be nyTz (from stats_hourly main table), so granularity is NY-daily
 	// query.WithGranularity(semql.GranularityDaily, "advertiserName", "campaignName")
 
 	// Sort by date descending, then by impressions descending
 	// query.OrderBy("time_period", "DESC")
-	query.OrderBy("sumImpressions", "DESC")
+	query.OrderBy("sumImpression", "DESC")
 
 	// Limit to top 20 results
 	query.Limit(20)

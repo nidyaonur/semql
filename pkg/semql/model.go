@@ -17,32 +17,29 @@ type TableConfig struct {
 
 // DimensionField represents a dimension in a table
 type DimensionField struct {
-	Name          string // Dimension name
-	Column        string // Physical column name in ClickHouse
-	Type          string // Data type
-	Description   string // Optional description
-	Primary       bool   // Whether this is a primary key
-	ExternalTable string // Name of the external table this dimension is from (empty if not external)
+	Name        string   // Dimension name (used as alias)
+	Column      string   // Physical column name or SQL expression
+	Type        string   // Data type
+	Description string   // Optional description
+	Primary     bool     // Whether this is a primary key
+	JoinPath    []string // Join path to reach this field (e.g., ["advertisers"] or ["campaigns", "advertisers"])
 }
 
 // MetricField represents a metric in a table
 type MetricField struct {
-	Name          string // Metric name
-	Column        string // Physical column name in ClickHouse
-	Type          string // Data type
-	Expression    string // SQL expression for calculated metrics
-	Description   string // Optional description
-	Format        string // Optional formatting hint
-	ExternalTable string `yaml:"external_table"` // Name of the external table this metric is from (empty if not external)
+	Name        string   // Metric name (used as alias)
+	Column      string   // Physical column name or SQL expression
+	Type        string   // Data type
+	Description string   // Optional description
+	Format      string   // Optional formatting hint
+	JoinPath    []string // Join path to reach this field (e.g., ["advertisers"] or ["campaigns", "advertisers"])
 }
 
 // JoinConfig defines how tables are joined
 type JoinConfig struct {
-	Table              string   // Reference to another table name
-	Type               JoinType // Type of join (LEFT, INNER, etc.)
-	Conditions         []JoinCondition
-	ExternalDimensions []string `yaml:"external_dimensions,omitempty"` // Dimensions that trigger this join if selected
-	ExternalMetrics    []string `yaml:"external_metrics,omitempty"`    // Metrics that trigger this join if selected
+	Table      string   // Reference to another table name
+	Type       JoinType // Type of join (LEFT, INNER, etc.)
+	Conditions []JoinCondition
 }
 
 // JoinCondition defines a join condition between two tables
@@ -61,18 +58,6 @@ const (
 	LeftJoin  JoinType = "LEFT JOIN"
 	RightJoin JoinType = "RIGHT JOIN"
 	FullJoin  JoinType = "FULL JOIN"
-)
-
-// TimeGranularity represents the level of time aggregation
-type TimeGranularity string
-
-// Time granularity constants
-const (
-	GranularityHourly  TimeGranularity = "HOURLY"
-	GranularityDaily   TimeGranularity = "DAILY"
-	GranularityWeekly  TimeGranularity = "WEEKLY"
-	GranularityMonthly TimeGranularity = "MONTHLY"
-	GranularityYearly  TimeGranularity = "YEARLY"
 )
 
 // Schema holds the entire schema configuration with all tables
