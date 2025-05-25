@@ -12,39 +12,39 @@ import (
 )
 
 // Example data models that can be used with the query results
-type Campaign struct {
-	ID           int       `db:"id"`
-	Name         string    `db:"name"`
-	AdvertiserID int       `db:"advertiser_id"`
-	StartDate    time.Time `db:"start_date"`
-	EndDate      time.Time `db:"end_date"`
-	Budget       float64   `db:"budget"`
+type Movie struct {
+	ID        int       `db:"id"`
+	Name      string    `db:"name"`
+	CinemaID  int       `db:"cinema_id"`
+	StartDate time.Time `db:"start_date"`
+	EndDate   time.Time `db:"end_date"`
+	Budget    float64   `db:"budget"`
 }
 
-type Advertiser struct {
+type Cinema struct {
 	ID      int     `db:"id"`
 	Name    string  `db:"name"`
 	Balance float64 `db:"balance"`
 }
 
 type StatsHourly struct {
-	Time         time.Time `db:"time"`
-	AdvertiserID int       `db:"advertiser_id"`
-	CampaignID   int       `db:"campaign_id"`
-	Impressions  int64     `db:"sum_impression"`
-	Clicks       int64     `db:"sum_click"`
-	Spend        float64   `db:"sum_spend"`
+	Time     time.Time `db:"time"`
+	CinemaID int       `db:"cinema_id"`
+	MovieID  int       `db:"movie_id"`
+	Watches  int64     `db:"sum_watch"`
+	Events   int64     `db:"sum_event"`
+	Revenue  float64   `db:"sum_revenue"`
 }
 
 // Time series aggregated stats
 type TimeSeriesStats struct {
-	TimePeriod     time.Time `db:"time_period"`
-	CampaignName   string    `db:"campaignName"`
-	AdvertiserName string    `db:"advertiserName"`
-	Impressions    int64     `db:"sumImpression"`
-	Clicks         int64     `db:"sumClick"`
-	Spend          float64   `db:"spend"`
-	CTR            float64   `db:"ctr"`
+	TimePeriod time.Time `db:"time_period"`
+	MovieName  string    `db:"movieName"`
+	CinemaName string    `db:"cinemaName"`
+	Watches    int64     `db:"sumWatch"`
+	Events     int64     `db:"sumEvent"`
+	Revenue    float64   `db:"revenue"`
+	EventRate  float64   `db:"eventRate"`
 }
 
 // ExampleSetup demonstrates how to set up a schema with tables, dimensions, metrics, and relationships
@@ -56,48 +56,48 @@ func ExampleSetup() *semql.Schema {
 	tz, _ := time.LoadLocation("Europe/Istanbul")
 	// tokyoTz, _ := time.LoadLocation("Asia/Tokyo")
 
-	// Define the campaigns table (in PostgreSQL)
-	campaignsTable := &semql.TableConfig{
-		Name:  "facts.campaigns",
-		Alias: "c",
+	// Define the movies table (in PostgreSQL)
+	moviesTable := &semql.TableConfig{
+		Name:  "facts.movies",
+		Alias: "m",
 		Dimensions: []*semql.DimensionField{
 			{
-				Name:        "campaignId",
+				Name:        "movieId",
 				Column:      "id",
 				Type:        "Int32",
-				Description: "Unique identifier for the campaign",
+				Description: "Unique identifier for the movie",
 				Primary:     true,
 			},
 			{
-				Name:        "campaignName",
+				Name:        "movieName",
 				Column:      "name",
 				Type:        "String",
-				Description: "Name of the campaign",
+				Description: "Name of the movie",
 			},
 			{
-				Name:        "advertiserId",
-				Column:      "advertiser_id",
+				Name:        "cinemaId",
+				Column:      "cinema_id",
 				Type:        "Int32",
-				Description: "ID of the advertiser who owns the campaign",
+				Description: "ID of the cinema showing the movie",
 			},
 			{
-				Name:        "advertiserName",
+				Name:        "cinemaName",
 				Column:      "name",
 				Type:        "String",
-				Description: "Name of the advertiser",
-				JoinPath:    []string{"facts.advertisers"}, // This field comes from advertisers table
+				Description: "Name of the cinema",
+				JoinPath:    []string{"facts.cinemas"}, // This field comes from cinemas table
 			},
 			{
 				Name:        "startDate",
 				Column:      "start_date",
 				Type:        "Date",
-				Description: "Start date of the campaign",
+				Description: "Start date of the movie screening",
 			},
 			{
 				Name:        "endDate",
 				Column:      "end_date",
 				Type:        "Date",
-				Description: "End date of the campaign",
+				Description: "End date of the movie screening",
 			},
 			// Time granularity dimensions that reference the time field from stats_hourly
 			{
@@ -141,91 +141,91 @@ func ExampleSetup() *semql.Schema {
 				Name:        "budget",
 				Column:      "budget",
 				Type:        "Float64",
-				Description: "Campaign budget",
+				Description: "Movie production budget",
 				Format:      "currency",
 			},
 			{
 				Name:        "balance",
 				Column:      "balance",
 				Type:        "Float64",
-				Description: "Advertiser balance",
+				Description: "Cinema balance",
 				Format:      "currency",
-				JoinPath:    []string{"facts.advertisers"}, // This field comes from advertisers table
+				JoinPath:    []string{"facts.cinemas"}, // This field comes from cinemas table
 			},
 			{
-				Name:        "sumImpression",
-				Column:      "sum_impression",
+				Name:        "sumWatch",
+				Column:      "sum_watch",
 				Type:        "Int64",
-				Description: "Sum of impressions",
+				Description: "Sum of movie watches",
 				JoinPath:    []string{"stats.stats_hourly"}, // This field comes from stats_hourly table
 			},
 			{
-				Name:        "sumClick",
-				Column:      "sum_click",
+				Name:        "sumEvent",
+				Column:      "sum_event",
 				Type:        "Int64",
-				Description: "Sum of clicks",
+				Description: "Sum of events during movie",
 				JoinPath:    []string{"stats.stats_hourly"}, // This field comes from stats_hourly table
 			},
 			{
-				Name:        "spend",
-				Column:      "sum_spend",
+				Name:        "revenue",
+				Column:      "sum_revenue",
 				Type:        "Float64",
-				Description: "Sum of spend",
+				Description: "Sum of revenue",
 				Format:      "currency",
 				JoinPath:    []string{"stats.stats_hourly"}, // This field comes from stats_hourly table
 			},
 			{
-				Name:        "ctr",
-				Column:      "(SUM(sh.sum_click) / SUM(sh.sum_impression)) * 100",
+				Name:        "eventRate",
+				Column:      "(SUM(sh.sum_event) / SUM(sh.sum_watch)) * 100",
 				Type:        "Float64",
-				Description: "Click-through rate (percentage)",
+				Description: "Event rate (percentage)",
 				Format:      "percentage",
 				JoinPath:    []string{"stats.stats_hourly"}, // This expression uses stats_hourly table
 			},
 			{
-				Name:        "cpc",
-				Column:      "SUM(sh.sum_spend) / NULLIF(SUM(sh.sum_click), 0)",
+				Name:        "revenuePerWatch",
+				Column:      "SUM(sh.sum_revenue) / NULLIF(SUM(sh.sum_watch), 0)",
 				Type:        "Float64",
-				Description: "Cost per click",
+				Description: "Revenue per watch",
 				Format:      "currency",
 				JoinPath:    []string{"stats.stats_hourly"}, // This expression uses stats_hourly table
 			},
 		},
 		Joins: []*semql.JoinConfig{
 			{
-				Table: "facts.advertisers",
+				Table: "facts.cinemas",
 				Type:  semql.LeftJoin,
 				Conditions: []semql.JoinCondition{
-					{LeftField: "advertiser_id", Operator: "=", RightField: "id"},
+					{LeftField: "cinema_id", Operator: "=", RightField: "id"},
 				},
 			},
 			{
 				Table: "stats.stats_hourly",
 				Type:  semql.LeftJoin,
 				Conditions: []semql.JoinCondition{
-					{LeftField: "id", Operator: "=", RightField: "campaign_id"},
+					{LeftField: "id", Operator: "=", RightField: "movie_id"},
 				},
 			},
 		},
 	}
 
-	// Define the advertisers table (in PostgreSQL)
-	advertisersTable := &semql.TableConfig{
-		Name:  "facts.advertisers",
-		Alias: "a",
+	// Define the cinemas table (in PostgreSQL)
+	cinemasTable := &semql.TableConfig{
+		Name:  "facts.cinemas",
+		Alias: "c",
 		Dimensions: []*semql.DimensionField{
 			{
-				Name:        "advertiserId",
+				Name:        "cinemaId",
 				Column:      "id",
 				Type:        "Int32",
-				Description: "Unique identifier for the advertiser",
+				Description: "Unique identifier for the cinema",
 				Primary:     true,
 			},
 			{
-				Name:        "advertiserName",
+				Name:        "cinemaName",
 				Column:      "name",
 				Type:        "String",
-				Description: "Name of the advertiser",
+				Description: "Name of the cinema",
 			},
 		},
 		Metrics: []*semql.MetricField{
@@ -233,7 +233,7 @@ func ExampleSetup() *semql.Schema {
 				Name:        "balance",
 				Column:      "balance",
 				Type:        "Float64",
-				Description: "Advertiser balance",
+				Description: "Cinema balance",
 				Format:      "currency",
 			},
 		},
@@ -248,30 +248,30 @@ func ExampleSetup() *semql.Schema {
 		TimeZone:  tz, // Set default timezone for this table to Istanbul
 		Dimensions: []*semql.DimensionField{
 			{
-				Name:        "advertiserId",
-				Column:      "advertiser_id",
+				Name:        "cinemaId",
+				Column:      "cinema_id",
 				Type:        "Int32",
-				Description: "ID of the advertiser",
+				Description: "ID of the cinema",
 			},
 			{
-				Name:        "campaignId",
-				Column:      "campaign_id",
+				Name:        "movieId",
+				Column:      "movie_id",
 				Type:        "Int32",
-				Description: "ID of the campaign",
+				Description: "ID of the movie",
 			},
 			{
-				Name:        "campaignName",
+				Name:        "movieName",
 				Column:      "name",
 				Type:        "String",
-				Description: "Name of the campaign",
-				JoinPath:    []string{"facts.campaigns"}, // This field comes from campaigns table
+				Description: "Name of the movie",
+				JoinPath:    []string{"facts.movies"}, // This field comes from movies table
 			},
 			{
-				Name:        "advertiserName",
+				Name:        "cinemaName",
 				Column:      "name",
 				Type:        "String",
-				Description: "Name of the advertiser",
-				JoinPath:    []string{"facts.advertisers"}, // This field comes from advertisers table
+				Description: "Name of the cinema",
+				JoinPath:    []string{"facts.cinemas"}, // This field comes from cinemas table
 			},
 			// Time granularity dimensions using this table's time field directly
 			{
@@ -307,60 +307,60 @@ func ExampleSetup() *semql.Schema {
 		},
 		Metrics: []*semql.MetricField{
 			{
-				Name:        "sumImpression",
-				Column:      "sum_impression",
+				Name:        "sumWatch",
+				Column:      "sum_watch",
 				Type:        "Int64",
-				Description: "Sum of impressions",
+				Description: "Sum of movie watches",
 			},
 			{
-				Name:        "sumClick",
-				Column:      "sum_click",
+				Name:        "sumEvent",
+				Column:      "sum_event",
 				Type:        "Int64",
-				Description: "Sum of clicks",
+				Description: "Sum of events during movie",
 			},
 			{
-				Name:        "spend",
-				Column:      "sum_spend",
+				Name:        "revenue",
+				Column:      "sum_revenue",
 				Type:        "Float64",
-				Description: "Sum of spend",
+				Description: "Sum of revenue",
 				Format:      "currency",
 			},
 			{
-				Name:        "ctr",
-				Column:      "(SUM(sh.sum_click) / SUM(sh.sum_impression)) * 100",
+				Name:        "eventRate",
+				Column:      "(SUM(sh.sum_event) / SUM(sh.sum_watch)) * 100",
 				Type:        "Float64",
-				Description: "Click-through rate (percentage)",
+				Description: "Event rate (percentage)",
 				Format:      "percentage",
 			},
 			{
-				Name:        "cpc",
-				Column:      "SUM(sh.sum_spend) / NULLIF(SUM(sh.sum_click), 0)",
+				Name:        "revenuePerWatch",
+				Column:      "SUM(sh.sum_revenue) / NULLIF(SUM(sh.sum_watch), 0)",
 				Type:        "Float64",
-				Description: "Cost per click",
+				Description: "Revenue per watch",
 				Format:      "currency",
 			},
 		},
 		Joins: []*semql.JoinConfig{
 			{
-				Table: "facts.campaigns",
+				Table: "facts.movies",
 				Type:  semql.LeftJoin,
 				Conditions: []semql.JoinCondition{
-					{LeftField: "campaign_id", Operator: "=", RightField: "id"},
+					{LeftField: "movie_id", Operator: "=", RightField: "id"},
 				},
 			},
 			{
-				Table: "facts.advertisers",
+				Table: "facts.cinemas",
 				Type:  semql.LeftJoin,
 				Conditions: []semql.JoinCondition{
-					{LeftField: "advertiser_id", Operator: "=", RightField: "id"},
+					{LeftField: "cinema_id", Operator: "=", RightField: "id"},
 				},
 			},
 		},
 	}
 
 	// Add tables to the schema
-	schema.AddTable(campaignsTable)
-	schema.AddTable(advertisersTable)
+	schema.AddTable(moviesTable)
+	schema.AddTable(cinemasTable)
 	schema.AddTable(statsHourlyTable)
 
 	return schema
@@ -368,37 +368,37 @@ func ExampleSetup() *semql.Schema {
 
 // ExampleQueries demonstrates how to build and execute queries using the schema
 func ExampleQueries(schema *semql.Schema) {
-	// Example 1: Simple query with dimensions and metrics from the campaigns table
-	query1 := semql.NewQueryBuilder(schema, "facts.campaigns")
-	query1.Select("campaignName", "startDate", "endDate", "budget")
+	// Example 1: Simple query with dimensions and metrics from the movies table
+	query1 := semql.NewQueryBuilder(schema, "facts.movies")
+	query1.Select("movieName", "startDate", "endDate", "budget")
 	sql1, args1, err1 := query1.BuildSQL()
 	if err1 != nil {
 		log.Fatalf("Query 1 failed: %v", err1)
 	}
 
-	fmt.Println("Example 1 - Simple Query (Campaigns only):")
+	fmt.Println("Example 1 - Simple Query (Movies only):")
 	fmt.Println(sql1)
 	fmt.Println("Args:", args1)
 	fmt.Println()
 
-	// Example 2: Query with automatic join to advertisers
-	query2 := semql.NewQueryBuilder(schema, "facts.campaigns")
-	query2.Select("campaignName", "advertiserName", "budget", "balance")
+	// Example 2: Query with automatic join to cinemas
+	query2 := semql.NewQueryBuilder(schema, "facts.movies")
+	query2.Select("movieName", "cinemaName", "budget", "balance")
 	sql2, args2, err2 := query2.BuildSQL()
 	if err2 != nil {
 		log.Fatalf("Query 2 failed: %v", err2)
 	}
 
-	fmt.Println("Example 2 - Query with automatic advertiser join:")
+	fmt.Println("Example 2 - Query with automatic cinema join:")
 	fmt.Println(sql2)
 	fmt.Println("Args:", args2)
 	fmt.Println()
 
 	// Example 3: Query with automatic join to stats_hourly
-	query3 := semql.NewQueryBuilder(schema, "facts.campaigns")
-	query3.Select("campaignName", "advertiserName", "sumImpression", "sumClick", "spend", "ctr")
-	query3.Where("sumImpression", ">", 1000)
-	query3.OrderBy("ctr", "DESC")
+	query3 := semql.NewQueryBuilder(schema, "facts.movies")
+	query3.Select("movieName", "cinemaName", "sumWatch", "sumEvent", "revenue", "eventRate")
+	query3.Where("sumWatch", ">", 1000)
+	query3.OrderBy("eventRate", "DESC")
 	query3.Limit(10)
 	sql3, args3, err3 := query3.BuildSQL()
 	if err3 != nil {
@@ -413,37 +413,37 @@ func ExampleQueries(schema *semql.Schema) {
 
 // ExampleTimeBasedQueries demonstrates how to build and execute time-based queries with different granularities
 func ExampleTimeBasedQueries(schema *semql.Schema) {
-	// Example 1: Daily stats for a campaign over the last 7 days
+	// Example 1: Daily stats for a movie over the last 7 days
 	startDate := time.Now().AddDate(0, 0, -7)
 	endDate := time.Now()
 
 	query1 := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query1.Select("campaignId", "timeDay", "sumImpression", "sumClick", "spend", "ctr")
+	query1.Select("movieId", "timeDay", "sumWatch", "sumEvent", "revenue", "eventRate")
 	query1.Between(startDate, endDate)
-	query1.Where("campaignId", "=", 123)
+	query1.Where("movieId", "=", 123)
 	sql1, args1, err1 := query1.BuildSQL()
 	if err1 != nil {
 		log.Fatalf("Time Query 1 failed: %v", err1)
 	}
 
-	fmt.Println("Example 1 - Daily stats for a campaign:")
+	fmt.Println("Example 1 - Daily stats for a movie:")
 	fmt.Println(sql1)
 	fmt.Println("Args:", args1)
 	fmt.Println()
 
-	// Example 2: Monthly stats aggregated by advertiser
+	// Example 2: Monthly stats aggregated by cinema
 	startDate = time.Date(time.Now().Year(), 1, 1, 0, 0, 0, 0, time.UTC)
 	endDate = time.Now()
 
-	query2 := semql.NewQueryBuilder(schema, "facts.campaigns")
-	query2.Select("timeMonth", "advertiserName", "sumImpression", "sumClick", "spend", "ctr")
+	query2 := semql.NewQueryBuilder(schema, "facts.movies")
+	query2.Select("timeMonth", "cinemaName", "sumWatch", "sumEvent", "revenue", "eventRate")
 	query2.Between(startDate, endDate)
 	sql2, args2, err2 := query2.BuildSQL()
 	if err2 != nil {
 		log.Fatalf("Time Query 2 failed: %v", err2)
 	}
 
-	fmt.Println("Example 2 - Monthly stats by advertiser:")
+	fmt.Println("Example 2 - Monthly stats by cinema:")
 	fmt.Println(sql2)
 	fmt.Println("Args:", args2)
 	fmt.Println()
@@ -453,7 +453,7 @@ func ExampleTimeBasedQueries(schema *semql.Schema) {
 	endDate = time.Now()
 
 	query3 := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query3.Select("timeHour", "sumImpression", "sumClick", "ctr")
+	query3.Select("timeHour", "sumWatch", "sumEvent", "eventRate")
 	query3.Between(startDate, endDate)
 	query3.OrderBy("timeHour", "ASC")
 	sql3, args3, err3 := query3.BuildSQL()
@@ -466,21 +466,21 @@ func ExampleTimeBasedQueries(schema *semql.Schema) {
 	fmt.Println("Args:", args3)
 	fmt.Println()
 
-	// Example 4: Weekly performance comparison between campaigns
+	// Example 4: Weekly performance comparison between movies
 	startDate = time.Now().AddDate(0, 0, -30) // Last 30 days
 	endDate = time.Now()
 
-	query4 := semql.NewQueryBuilder(schema, "facts.campaigns")
-	query4.Select("timeWeek", "campaignName", "sumImpression", "sumClick", "spend", "ctr")
+	query4 := semql.NewQueryBuilder(schema, "facts.movies")
+	query4.Select("timeWeek", "movieName", "sumWatch", "sumEvent", "revenue", "eventRate")
 	query4.Between(startDate, endDate)
-	query4.OrderBy("campaignName", "ASC")
+	query4.OrderBy("movieName", "ASC")
 	query4.OrderBy("timeWeek", "ASC")
 	sql4, args4, err4 := query4.BuildSQL()
 	if err4 != nil {
 		log.Fatalf("Time Query 4 failed: %v", err4)
 	}
 
-	fmt.Println("Example 4 - Weekly performance by campaign:")
+	fmt.Println("Example 4 - Weekly performance by movie:")
 	fmt.Println(sql4)
 	fmt.Println("Args:", args4)
 	fmt.Println()
@@ -505,8 +505,8 @@ func ExampleExecuteTimeQuery(schema *semql.Schema) {
 		log.Fatalf("Failed to load timezone: %v", err)
 	}
 
-	query := semql.NewQueryBuilder(schema, "facts.campaigns")
-	query.Select("campaignName", "advertiserName", "timeDay", "sumImpression", "sumClick", "spend", "ctr")
+	query := semql.NewQueryBuilder(schema, "facts.movies")
+	query.Select("movieName", "cinemaName", "timeDay", "sumWatch", "sumEvent", "revenue", "eventRate")
 	query.Between(startDate, endDate)
 	query.WithTimezone(tz) // Operate in Istanbul timezone context
 
@@ -519,17 +519,17 @@ func ExampleExecuteTimeQuery(schema *semql.Schema) {
 	}
 
 	// Process and display results
-	fmt.Println("Daily Campaign Performance:")
-	fmt.Println("==========================")
+	fmt.Println("Daily Movie Performance:")
+	fmt.Println("=======================")
 
 	for _, stat := range results {
-		fmt.Printf("%s | %s | %s | Impressions: %d | Clicks: %d | CTR: %.2f%%\n",
+		fmt.Printf("%s | %s | %s | Watches: %d | Events: %d | Event Rate: %.2f%%\n",
 			stat.TimePeriod.Format("2006-01-02"),
-			stat.AdvertiserName,
-			stat.CampaignName,
-			stat.Impressions,
-			stat.Clicks,
-			stat.CTR)
+			stat.CinemaName,
+			stat.MovieName,
+			stat.Watches,
+			stat.Events,
+			stat.EventRate)
 	}
 }
 
@@ -545,7 +545,7 @@ func ExampleTimezoneQueries(schema *semql.Schema) {
 	endDate := time.Date(2025, 5, 24, 23, 59, 59, 0, tz)
 
 	query1 := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query1.Select("timeDay", "sumImpression", "sumClick", "ctr")
+	query1.Select("timeDay", "sumWatch", "sumEvent", "eventRate")
 	query1.Between(startDate, endDate)
 	query1.WithTimezone(tz) // Explicitly set timezone to Istanbul
 	sql1, args1, err1 := query1.BuildSQL()
@@ -560,7 +560,7 @@ func ExampleTimezoneQueries(schema *semql.Schema) {
 
 	// Example 2: Same date range but with London timezone
 	query2 := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query2.Select("timeDay", "sumImpression", "sumClick", "ctr")
+	query2.Select("timeDay", "sumWatch", "sumEvent", "eventRate")
 	query2.Between(startDate, endDate) // Same time range but will be interpreted in London time
 	query2.WithTimezone(londonTz)      // Explicitly set timezone to London
 	sql2, args2, err2 := query2.BuildSQL()
@@ -578,7 +578,7 @@ func ExampleTimezoneQueries(schema *semql.Schema) {
 	endOfDay := time.Date(2025, 5, 24, 23, 59, 59, 0, tokyoTz)
 
 	query3 := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query3.Select("timeHour", "sumImpression", "sumClick", "spend", "ctr")
+	query3.Select("timeHour", "sumWatch", "sumEvent", "revenue", "eventRate")
 	query3.Between(startOfDay, endOfDay)
 	query3.WithTimezone(tokyoTz)
 	query3.OrderBy("timeHour", "ASC")
@@ -616,7 +616,7 @@ func ExampleTimezoneQueries(schema *semql.Schema) {
 		dayEnd := time.Date(2025, 5, 24, 23, 59, 59, 0, tz)
 
 		query := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-		query.Select("timeDay", "sumImpression", "sumClick")
+		query.Select("timeDay", "sumWatch", "sumEvent")
 		query.Between(dayStart, dayEnd)
 		query.WithTimezone(tz)
 		sql, args, err := query.BuildSQL()
@@ -659,7 +659,7 @@ func ExampleCustomClickHouseConnection(schema *semql.Schema) {
 				Name    string
 				Version string
 			}{
-				{Name: "my-app", Version: "0.1"},
+				{Name: "cinema-analytics", Version: "0.1"},
 			},
 		},
 	})
@@ -680,7 +680,7 @@ func ExampleCustomClickHouseConnection(schema *semql.Schema) {
 	endDate := time.Now()
 
 	query := semql.NewQueryBuilder(schema, "stats.stats_hourly")
-	query.Select("campaignId", "sumImpression", "sumClick", "ctr")
+	query.Select("movieId", "sumWatch", "sumEvent", "eventRate")
 	query.Between(startDate, endDate)
 	query.Limit(10)
 
@@ -699,22 +699,22 @@ func ExampleCustomClickHouseConnection(schema *semql.Schema) {
 			if i >= 3 {
 				break // Just show the first 3
 			}
-			fmt.Printf("%s | Impressions: %d | Clicks: %d | CTR: %.2f%%\n",
+			fmt.Printf("%s | Watches: %d | Events: %d | Event Rate: %.2f%%\n",
 				stat.TimePeriod.Format("2006-01-02"),
-				stat.Impressions,
-				stat.Clicks,
-				stat.CTR)
+				stat.Watches,
+				stat.Events,
+				stat.EventRate)
 		}
 	}
 }
 
-// ExampleLastTwoDaysData demonstrates how to query data for the last 2 days with advertiser name, campaign name, and impressions
+// ExampleLastTwoDaysData demonstrates how to query data for the last 2 days with cinema name, movie name, and watches
 func ExampleLastTwoDaysData(schema *semql.Schema) {
 	// Calculate time range for the last 2 days in Istanbul timezone
 	// Using the current date from context for consistency with example SQL
 	baseDate := time.Date(2025, 5, 24, 0, 0, 0, 0, time.UTC)
-	startDate := baseDate.AddDate(0, 0, -2) // 2 days ago in NY
-	endDate := baseDate                     // Today in NY (exclusive end for < operator)
+	startDate := baseDate.AddDate(0, 0, -2) // 2 days ago
+	endDate := baseDate                     // Today (exclusive end for < operator)
 
 	fmt.Printf("\\n--- Example: Last 2 Days Data (From %s to %s) ---\\n",
 		startDate.Format("2006-01-02"),
@@ -723,20 +723,16 @@ func ExampleLastTwoDaysData(schema *semql.Schema) {
 	// Create a new query starting from stats_hourly table
 	query := semql.NewQueryBuilder(schema, "stats.stats_hourly")
 
-	// Select advertiser name, campaign name, and sum of impressions
-	query.Select("timeDay", "advertiserId", "campaignId", "sumImpression")
+	// Select cinema name, movie name, and sum of watches
+	query.Select("timeDay", "cinemaId", "movieId", "sumWatch")
 
 	// Filter for the last 2 days
 	query.Between(startDate, endDate)
 
-	query.Where("campaignId", "=", 5938) // Example campaign ID
+	query.Where("movieId", "=", 5938) // Example movie ID
 
-	// Group by day, advertiser, and campaign
-	// query.WithGranularity(semql.GranularityDaily, "advertiserName", "campaignName")
-
-	// Sort by date descending, then by impressions descending
-	// query.OrderBy("time_period", "DESC")
-	query.OrderBy("sumImpression", "DESC")
+	// Sort by date descending, then by watches descending
+	query.OrderBy("sumWatch", "DESC")
 
 	// Limit to top 20 results
 	query.Limit(20)
